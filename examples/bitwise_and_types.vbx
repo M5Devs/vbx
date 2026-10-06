@@ -1,0 +1,40 @@
+' Bitwise Operators and Sized Types Example
+
+Type PacketHeader
+    magic As Byte
+    port As Short
+End Type
+
+Dim header As PacketHeader
+header.magic = 255
+header.port = 8080
+
+Print "Header Magic: " + header.magic
+Print "Header Port: " + header.port
+
+Dim mask As Byte = 15
+Dim flags As Byte = 240
+
+Dim combined As Byte = mask Or flags
+Print "Mask Or Flags: " + combined
+
+Dim masked As Byte = combined And 240
+Print "Combined And 240: " + masked
+
+Dim toggled As Byte = mask Xor 255
+Print "Mask Xor 255: " + toggled
+
+Dim shiftedLeft As Short = 1 Shl 8
+Print "1 Shl 8: " + shiftedLeft
+
+Dim shiftedRight As Short = 1024 Shr 2
+Print "1024 Shr 2: " + shiftedRight
+
+Dim symbolShiftLeft As Short = 1 << 4
+Print "1 << 4: " + symbolShiftLeft
+
+Dim symbolShiftRight As Short = 64 >> 3
+Print "64 >> 3: " + symbolShiftRight
+
+Dim inverted As Byte = Not 0
+Print "Not 0: " + inverted

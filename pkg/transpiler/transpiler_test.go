@@ -1851,3 +1851,84 @@ Print "After"
 		}
 	})
 }
+
+
+
+
+func TestTranspileBitwiseAndSizedTypes(t *testing.T) {
+	t.Run("Bitwise operators and Byte/Short transpilation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		vbxFile := filepath.Join(tmpDir, "test_bitwise.vbx")
+		content := []byte("Dim b As Byte = 255\nDim s As Short = 1000\nDim a = b And 15\nDim o = b Or 240\nDim x = b Xor 170\nDim n = Not b\nDim l1 = 1 Shl 4\nDim r1 = 16 Shr 2\nDim l2 = 1 << 4\nDim r2 = 16 >> 2\nPrint b\nPrint s\nPrint a\n")
+		if err := os.WriteFile(vbxFile, content, 0644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		cCode, err := Transpile(vbxFile)
+		if err != nil {
+			t.Fatalf("Transpile failed: %v", err)
+		}
+
+		expectedSnippets := []string{
+			"unsigned char b = 255LL;",
+			"short s = 1000LL;",
+			"(b & 15LL)",
+			"(b | 240LL)",
+			"(b ^ 170LL)",
+			"(~b)",
+			"(1LL << 4LL)",
+			"(16LL >> 2LL)",
+			`printf("%u\n", b);`,
+			`printf("%d\n", s);`,
+		}
+
+		for _, snippet := range expectedSnippets {
+			if !strings.Contains(cCode, snippet) {
+				t.Errorf("Expected snippet %q in C code, got:\n%s", snippet, cCode)
+			}
+		}
+	})
+
+	t.Run("Struct fields with Byte and Short", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		vbxFile := filepath.Join(tmpDir, "test_struct_sized.vbx")
+		content := []byte("Type Header\n    magic As Byte\n    port As Short\nEnd Type\n\nDim h As Header\nh.magic = 255\nh.port = 8080\nPrint h.magic\nPrint h.port\n")
+		if err := os.WriteFile(vbxFile, content, 0644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		cCode, err := Transpile(vbxFile)
+		if err != nil {
+			t.Fatalf("Transpile failed: %v", err)
+		}
+
+		expectedSnippets := []string{
+			"typedef struct {",
+			"    unsigned char magic;",
+			"    short port;",
+			"} Header;",
+			"h.magic = 255LL;",
+			"h.port = 8080LL;",
+			`printf("%u\n", h.magic);`,
+			`printf("%d\n", h.port);`,
+		}
+
+		for _, snippet := range expectedSnippets {
+			if !strings.Contains(cCode, snippet) {
+				t.Errorf("Expected snippet %q in C code, got:\n%s", snippet, cCode)
+			}
+		}
+	})
+
+	t.Run("BuildAndRun bitwise_and_types.vbx example", func(t *testing.T) {
+		examplePath := filepath.Join("..", "..", "examples", "bitwise_and_types.vbx")
+		if _, err := os.Stat(examplePath); os.IsNotExist(err) {
+			t.Skip("examples/bitwise_and_types.vbx not found")
+		}
+
+		err := BuildAndRun(examplePath)
+		if err != nil {
+			t.Fatalf("BuildAndRun examples/bitwise_and_types.vbx failed: %v", err)
+		}
+	})
+}
