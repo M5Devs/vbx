@@ -1,0 +1,23 @@
+' User-Defined Structs & Inline C Example in VBX
+
+Type Player
+    x As Integer
+    y As Integer
+    hp As Integer
+End Type
+
+Dim p As Player
+p.x = 100
+p.y = 50
+p.hp = 200
+
+Print "Player position X: " + p.x
+Print "Player position Y: " + p.y
+Print "Player HP: " + p.hp
+
+Dim total = p.x + p.y
+Print "Total coordinates sum: " + total
+
+__c
+    printf("Direct C code execution from inline C block!\n");
+__end_c

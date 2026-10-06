@@ -130,9 +130,22 @@ type FunctionInfo struct {
 	Source     string
 }
 
-type LineInfo struct {
+type StructField struct {
+	Name string
+	Type DataType
+}
+
+type StructInfo struct {
+	Name    string
+	Fields  []StructField
 	LineNum int
-	Text    string
+	Source  string
+}
+
+type LineInfo struct {
+	LineNum   int
+	Text      string
+	IsInlineC bool
 }
 
 type CallNode struct {
@@ -1126,32 +1139,65 @@ func Transpile(vbxPath string) (string, error) {
 	var lines []LineInfo
 	scanner := bufio.NewScanner(file)
 	lineNum := 0
+	inInlineC := false
+	inlineCStartLine := 0
+	inlineCStartSource := ""
+
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
+
+		if inInlineC {
+			if strings.EqualFold(trimmed, "__end_c") {
+				inInlineC = false
+				continue
+			}
+			lines = append(lines, LineInfo{LineNum: lineNum, Text: line, IsInlineC: true})
+			continue
+		}
+
+		if strings.EqualFold(trimmed, "__c") {
+			inInlineC = true
+			inlineCStartLine = lineNum
+			inlineCStartSource = line
+			continue
+		}
+
+		if strings.EqualFold(trimmed, "__end_c") {
+			return "", vbxError(lineNum, line, "__end_c without matching __c")
+		}
+
 		if trimmed == "" || strings.HasPrefix(trimmed, "'") {
 			continue
 		}
-		lines = append(lines, LineInfo{LineNum: lineNum, Text: line})
+		lines = append(lines, LineInfo{LineNum: lineNum, Text: line, IsInlineC: false})
 	}
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("error reading file %s: %w", vbxPath, err)
 	}
+	if inInlineC {
+		return "", vbxError(inlineCStartLine, inlineCStartSource, "unclosed inline C block (__c without __end_c)")
+	}
 
 	subHeaderRegex := regexp.MustCompile("(?i)^\\s*Sub\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?:\\((.*)\\))?\\s*$")
 	funcHeaderRegex := regexp.MustCompile("(?i)^\\s*Function\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?:\\((.*)\\))?\\s*$")
+	typeStartRegex := regexp.MustCompile("(?i)^\\s*Type\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*$")
+	endTypeRegex := regexp.MustCompile("(?i)^\\s*End\\s+Type\\s*$")
+	structFieldRegex := regexp.MustCompile("(?i)^\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s+As\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*$")
 	endSubRegex := regexp.MustCompile("(?i)^\\s*End\\s+Sub\\s*$")
 	endFuncRegex := regexp.MustCompile("(?i)^\\s*End\\s+Function\\s*$")
 	returnRegex := regexp.MustCompile("(?i)^\\s*Return(?:\\s+(.+))?\\s*$")
 
 	dimArrayParenRegex := regexp.MustCompile("(?i)^\\s*Dim\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(\\s*([0-9a-zA-Z_]+)\\s*\\)\\s*$")
 	dimArrayBracketRegex := regexp.MustCompile("(?i)^\\s*Dim\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\[\\s*([0-9a-zA-Z_]+)\\s*\\]\\s*$")
+	dimAsInitRegex := regexp.MustCompile("(?i)^\\s*Dim\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+As\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*=\\s*(.+)$")
+	dimAsRegex := regexp.MustCompile("(?i)^\\s*Dim\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+As\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*$")
 	dimRegex := regexp.MustCompile("(?i)^\\s*Dim\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*=\\s*(.+)$")
 	constRegex := regexp.MustCompile("(?i)^\\s*Const\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*=\\s*(.+)$")
 	assignArrayParenRegex := regexp.MustCompile("(?i)^\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(\\s*(.+)\\s*\\)\\s*=\\s*(.+)$")
 	assignArrayBracketRegex := regexp.MustCompile("(?i)^\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\[\\s*(.+)\\s*\\]\\s*=\\s*(.+)$")
-	assignRegex := regexp.MustCompile("(?i)^\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s*=\\s*(.+)$")
+	assignRegex := regexp.MustCompile("(?i)^\\s*([a-zA-Z_][a-zA-Z0-9_.]*)\\s*=\\s*(.+)$")
 	exitForRegex := regexp.MustCompile("(?i)^\\s*Exit\\s+For\\s*$")
 	exitWhileRegex := regexp.MustCompile("(?i)^\\s*Exit\\s+While\\s*$")
 	ifRegex := regexp.MustCompile("(?i)^\\s*If\\s+(.+)\\s+Then\\s*$")
@@ -1186,10 +1232,82 @@ func Transpile(vbxPath string) (string, error) {
 	funcMap := make(map[string]*FunctionInfo)
 	knownFunctions := make(map[string]bool)
 
+	var structs []*StructInfo
+	structMap := make(map[string]*StructInfo)
+
 	var currentFunc *FunctionInfo
+	var currentType *StructInfo
 
 	for _, l := range lines {
 		line := l.Text
+		if l.IsInlineC {
+			if currentType != nil {
+				return "", vbxError(l.LineNum, l.Text, "inline C inside Type definition is not allowed")
+			}
+			if currentFunc != nil {
+				currentFunc.BodyLines = append(currentFunc.BodyLines, l)
+			} else {
+				topLevelLines = append(topLevelLines, l)
+			}
+			continue
+		}
+
+		if matches := typeStartRegex.FindStringSubmatch(line); len(matches) > 1 {
+			if currentFunc != nil {
+				return "", vbxError(l.LineNum, l.Text, "nested Type definition is not allowed")
+			}
+			if currentType != nil {
+				return "", vbxError(l.LineNum, l.Text, "nested Type definition is not allowed")
+			}
+			typeName := matches[1]
+			if structMap[typeName] != nil {
+				return "", vbxError(l.LineNum, l.Text, fmt.Sprintf("type %q already declared", typeName))
+			}
+			st := &StructInfo{
+				Name:    typeName,
+				LineNum: l.LineNum,
+				Source:  l.Text,
+			}
+			structs = append(structs, st)
+			structMap[typeName] = st
+			currentType = st
+			continue
+		}
+
+		if endTypeRegex.MatchString(line) {
+			if currentType == nil {
+				return "", vbxError(l.LineNum, l.Text, "End Type without matching Type")
+			}
+			currentType = nil
+			continue
+		}
+
+		if currentType != nil {
+			if matches := structFieldRegex.FindStringSubmatch(line); len(matches) > 2 {
+				fName := matches[1]
+				tName := matches[2]
+				var dt DataType
+				switch strings.ToLower(tName) {
+				case "integer":
+					dt = TypeInt
+				case "double":
+					dt = TypeDouble
+				case "string":
+					dt = TypeString
+				default:
+					if stInfo, ok := structMap[tName]; ok {
+						dt = DataType(stInfo.Name)
+					} else {
+						return "", vbxError(l.LineNum, l.Text, fmt.Sprintf("unknown data type '%s' in struct field %s", tName, fName))
+					}
+				}
+				currentType.Fields = append(currentType.Fields, StructField{Name: fName, Type: dt})
+				continue
+			} else {
+				return "", vbxError(l.LineNum, l.Text, fmt.Sprintf("invalid struct field definition: %s", l.Text))
+			}
+		}
+
 		if matches := subHeaderRegex.FindStringSubmatch(line); len(matches) > 1 {
 			if currentFunc != nil {
 				return "", vbxError(l.LineNum, l.Text, "nested Sub or Function definition is not allowed")
@@ -1283,6 +1401,10 @@ func Transpile(vbxPath string) (string, error) {
 		} else {
 			topLevelLines = append(topLevelLines, l)
 		}
+	}
+
+	if currentType != nil {
+		return "", vbxError(currentType.LineNum, currentType.Source, fmt.Sprintf("unclosed Type block %s at end of file", currentType.Name))
 	}
 
 	if currentFunc != nil {
@@ -1512,8 +1634,41 @@ func Transpile(vbxPath string) (string, error) {
 		}
 		for _, l := range bodyLines {
 			line := l.Text
+			if l.IsInlineC {
+				continue
+			}
 			if matches := forRegex.FindStringSubmatch(line); len(matches) > 3 {
 				prePassEnv[matches[1]] = TypeInt
+			} else if matches := dimAsInitRegex.FindStringSubmatch(line); len(matches) > 3 {
+				varName := matches[1]
+				typeName := matches[2]
+				if stInfo, ok := structMap[typeName]; ok {
+					prePassEnv[varName] = DataType(stInfo.Name)
+					for _, f := range stInfo.Fields {
+						prePassEnv[varName+"."+f.Name] = f.Type
+					}
+				} else if strings.EqualFold(typeName, "integer") {
+					prePassEnv[varName] = TypeInt
+				} else if strings.EqualFold(typeName, "double") {
+					prePassEnv[varName] = TypeDouble
+				} else if strings.EqualFold(typeName, "string") {
+					prePassEnv[varName] = TypeString
+				}
+			} else if matches := dimAsRegex.FindStringSubmatch(line); len(matches) > 2 {
+				varName := matches[1]
+				typeName := matches[2]
+				if stInfo, ok := structMap[typeName]; ok {
+					prePassEnv[varName] = DataType(stInfo.Name)
+					for _, f := range stInfo.Fields {
+						prePassEnv[varName+"."+f.Name] = f.Type
+					}
+				} else if strings.EqualFold(typeName, "integer") {
+					prePassEnv[varName] = TypeInt
+				} else if strings.EqualFold(typeName, "double") {
+					prePassEnv[varName] = TypeDouble
+				} else if strings.EqualFold(typeName, "string") {
+					prePassEnv[varName] = TypeString
+				}
 			} else if matches := dimRegex.FindStringSubmatch(line); len(matches) > 2 {
 				varName := matches[1]
 				exprStr := matches[2]
@@ -1554,6 +1709,11 @@ func Transpile(vbxPath string) (string, error) {
 		for _, l := range bodyLines {
 			lineNum := l.LineNum
 			line := l.Text
+			if l.IsInlineC {
+				indent := strings.Repeat("    ", len(blockStack)+1)
+				stmts = append(stmts, indent+strings.TrimSpace(line))
+				continue
+			}
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" || strings.HasPrefix(trimmed, "'") {
 				continue
@@ -2081,6 +2241,101 @@ func Transpile(vbxPath string) (string, error) {
                 } else {
                     stmts = append(stmts, fmt.Sprintf("%sconst %s %s = %s;", indent, string(dt), constName, cExpr))
                 }
+			} else if matches := dimAsInitRegex.FindStringSubmatch(line); len(matches) > 3 {
+				varName := matches[1]
+				typeName := matches[2]
+				exprStr := matches[3]
+
+				if _, exists := localEnv[varName]; exists {
+					return nil, vbxError(lineNum, line, fmt.Sprintf("variable %q already declared", varName))
+				}
+
+				exprNode, err := parseExprWithFunctions(exprStr, knownFunctions)
+				if err != nil {
+					return nil, vbxError(lineNum, line, fmt.Sprintf("invalid expression in Dim %s: %v", varName, err))
+				}
+
+				dt, err := exprNode.ExprType(localEnv)
+				if err != nil {
+					return nil, vbxError(lineNum, line, fmt.Sprintf("%v", err))
+				}
+
+				if err := validateCalls(exprNode); err != nil {
+					return nil, vbxError(lineNum, line, fmt.Sprintf("%v", err))
+				}
+				cExpr, err := exprNode.ToC(localEnv)
+				if err != nil {
+					return nil, vbxError(lineNum, line, fmt.Sprintf("%v", err))
+				}
+
+				if strings.Contains(cExpr, "vbx_concat") || strings.Contains(cExpr, "vbx_") {
+					needsConcatHelper = true
+					needsStdio = true
+					needsStdlib = true
+				}
+
+				if stInfo, ok := structMap[typeName]; ok {
+					localEnv[varName] = DataType(stInfo.Name)
+					for _, f := range stInfo.Fields {
+						localEnv[varName+"."+f.Name] = f.Type
+					}
+					stmts = append(stmts, fmt.Sprintf("%s%s %s = %s;", indent, stInfo.Name, varName, cExpr))
+				} else {
+					var expectedDt DataType
+					switch strings.ToLower(typeName) {
+					case "integer":
+						expectedDt = TypeInt
+					case "double":
+						expectedDt = TypeDouble
+					case "string":
+						expectedDt = TypeString
+					default:
+						return nil, vbxError(lineNum, line, fmt.Sprintf("unknown data type %q", typeName))
+					}
+					if dt != expectedDt {
+						if expectedDt == TypeDouble && dt == TypeInt {
+							// ok
+						} else if expectedDt != dt {
+							return nil, vbxError(lineNum, line, fmt.Sprintf("cannot assign %s to %s variable %s", dt, expectedDt, varName))
+						}
+					}
+					localEnv[varName] = expectedDt
+					stmts = append(stmts, fmt.Sprintf("%s%s %s = %s;", indent, string(expectedDt), varName, cExpr))
+				}
+			} else if matches := dimAsRegex.FindStringSubmatch(line); len(matches) > 2 {
+				varName := matches[1]
+				typeName := matches[2]
+
+				if _, exists := localEnv[varName]; exists {
+					return nil, vbxError(lineNum, line, fmt.Sprintf("variable %q already declared", varName))
+				}
+
+				if stInfo, ok := structMap[typeName]; ok {
+					localEnv[varName] = DataType(stInfo.Name)
+					for _, f := range stInfo.Fields {
+						localEnv[varName+"."+f.Name] = f.Type
+					}
+					needsString = true
+					stmts = append(stmts, fmt.Sprintf("%s%s %s; memset(&%s, 0, sizeof(%s));", indent, stInfo.Name, varName, varName, varName))
+				} else {
+					var dt DataType
+					var defaultVal string
+					switch strings.ToLower(typeName) {
+					case "integer":
+						dt = TypeInt
+						defaultVal = "0LL"
+					case "double":
+						dt = TypeDouble
+						defaultVal = "0.0"
+					case "string":
+						dt = TypeString
+						defaultVal = "NULL"
+					default:
+						return nil, vbxError(lineNum, line, fmt.Sprintf("unknown data type %q", typeName))
+					}
+					localEnv[varName] = dt
+					stmts = append(stmts, fmt.Sprintf("%s%s %s = %s;", indent, string(dt), varName, defaultVal))
+				}
 			} else if matches := dimArrayParenRegex.FindStringSubmatch(line); len(matches) > 2 {
 				arrName := matches[1]
 				sizeStr := matches[2]
@@ -3073,6 +3328,14 @@ func Transpile(vbxPath string) (string, error) {
 		sb.WriteString("    *dst = '\\0';\n")
 		sb.WriteString("    return res;\n")
 		sb.WriteString("}\n\n")
+	}
+
+	for _, st := range structs {
+		sb.WriteString("typedef struct {\n")
+		for _, f := range st.Fields {
+			sb.WriteString(fmt.Sprintf("    %s %s;\n", string(f.Type), f.Name))
+		}
+		sb.WriteString(fmt.Sprintf("} %s;\n\n", st.Name))
 	}
 
 	for _, fn := range functions {

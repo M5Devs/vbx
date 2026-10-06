@@ -1700,3 +1700,154 @@ Print input
 		}
 	}
 }
+
+func TestTranspileStructsAndInlineC(t *testing.T) {
+	t.Run("Struct definition, assignment, and access", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		vbxFile := filepath.Join(tmpDir, "test_struct.vbx")
+		content := []byte(`
+Type Player
+    x As Integer
+    y As Integer
+    hp As Integer
+End Type
+
+Dim p As Player
+p.x = 100
+p.y = 50
+p.hp = 200
+Print p.x
+Dim total = p.x + p.y
+Print total
+`)
+		if err := os.WriteFile(vbxFile, content, 0644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		cCode, err := Transpile(vbxFile)
+		if err != nil {
+			t.Fatalf("Transpile failed: %v", err)
+		}
+
+		expectedSnippets := []string{
+			"typedef struct {",
+			"    long long x;",
+			"    long long y;",
+			"    long long hp;",
+			"} Player;",
+			"Player p;",
+			"p.x = 100LL;",
+			"p.y = 50LL;",
+			"p.hp = 200LL;",
+			`printf("%lld\n", p.x);`,
+			"long long total = (p.x + p.y);",
+		}
+
+		for _, snippet := range expectedSnippets {
+			if !strings.Contains(cCode, snippet) {
+				t.Errorf("Expected snippet %q in C code, got:\n%s", snippet, cCode)
+			}
+		}
+	})
+
+	t.Run("Inline C block verbatim emission", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		vbxFile := filepath.Join(tmpDir, "test_inline_c.vbx")
+		content := []byte(`
+Print "Before"
+__c
+    printf("Direct C code execution!\n");
+__end_c
+Print "After"
+`)
+		if err := os.WriteFile(vbxFile, content, 0644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		cCode, err := Transpile(vbxFile)
+		if err != nil {
+			t.Fatalf("Transpile failed: %v", err)
+		}
+
+		expectedSnippet := `printf("Direct C code execution!\n");`
+		if !strings.Contains(cCode, expectedSnippet) {
+			t.Errorf("Expected inline C code %q, got:\n%s", expectedSnippet, cCode)
+		}
+	})
+
+	t.Run("BuildAndRun structs_and_c example", func(t *testing.T) {
+		examplePath := filepath.Join("..", "..", "examples", "structs_and_c.vbx")
+		if _, err := os.Stat(examplePath); os.IsNotExist(err) {
+			t.Skip("examples/structs_and_c.vbx not found")
+		}
+
+		binPath, err := Build(examplePath, filepath.Join(t.TempDir(), "structs_demo"), false)
+		if err != nil {
+			t.Fatalf("Build examples/structs_and_c.vbx failed: %v", err)
+		}
+
+		cmd := exec.Command(binPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Execution of structs_and_c failed: %v, output: %s", err, string(out))
+		}
+
+		outStr := string(out)
+		expectedOutputs := []string{
+			"Player position X: 100",
+			"Player position Y: 50",
+			"Player HP: 200",
+			"Total coordinates sum: 150",
+			"Direct C code execution from inline C block!",
+		}
+
+		for _, expected := range expectedOutputs {
+			if !strings.Contains(outStr, expected) {
+				t.Errorf("Expected output to contain %q, got:\n%s", expected, outStr)
+			}
+		}
+	})
+
+	t.Run("Struct & Inline C error cases", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			content string
+		}{
+			{
+				name:    "Unclosed Type block",
+				content: "Type Player\nx As Integer",
+			},
+			{
+				name:    "Unclosed inline C block",
+				content: "__c\nprintf(\"hi\");",
+			},
+			{
+				name:    "__end_c without __c",
+				content: "__end_c",
+			},
+			{
+				name:    "Undefined struct type",
+				content: "Dim p As UnknownType",
+			},
+			{
+				name:    "Duplicate Type declaration",
+				content: "Type Point\nx As Integer\nEnd Type\nType Point\ny As Integer\nEnd Type",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				vbxFile := filepath.Join(tmpDir, "err.vbx")
+				if err := os.WriteFile(vbxFile, []byte(tt.content), 0644); err != nil {
+					t.Fatalf("Failed to write file: %v", err)
+				}
+
+				_, err := Transpile(vbxFile)
+				if err == nil {
+					t.Errorf("Expected error for %q, got nil", tt.name)
+				}
+			})
+		}
+	})
+}
