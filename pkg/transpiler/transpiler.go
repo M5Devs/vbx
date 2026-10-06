@@ -22,11 +22,17 @@ type DataType string
 
 const (
 	TypeInt     DataType = "long long"
+	TypeByte    DataType = "unsigned char"
+	TypeShort   DataType = "short"
 	TypeDouble  DataType = "double"
 	TypeString  DataType = "const char*"
 	TypeUnknown DataType = "unknown"
 	TypeVoid    DataType = "void"
 )
+
+func isIntegerType(dt DataType) bool {
+	return dt == TypeInt || dt == TypeByte || dt == TypeShort
+}
 
 // Simple expression AST node & parser to evaluate types and transpile C expressions.
 type ExprNode interface {
@@ -98,7 +104,7 @@ func (n *IndexNode) ExprType(env map[string]DataType) (DataType, error) {
 	if err != nil {
 		return TypeUnknown, err
 	}
-	if idxType != TypeInt {
+	if !isIntegerType(idxType) {
 		return TypeUnknown, fmt.Errorf("array index for %s must be integer, got %s", n.ArrayName, idxType)
 	}
 	return t, nil
@@ -201,7 +207,7 @@ func (c *CallNode) ToC(env map[string]DataType) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if arg0Type == TypeInt {
+		if isIntegerType(arg0Type) {
 			return fmt.Sprintf("llabs(%s)", arg0C), nil
 		} else if arg0Type == TypeDouble {
 			return fmt.Sprintf("fabs(%s)", arg0C), nil
@@ -307,7 +313,7 @@ func (c *CallNode) ToC(env map[string]DataType) (string, error) {
 			return "", err
 		}
 		arg1Type, err := c.Args[1].ExprType(env)
-		if err != nil || arg1Type != TypeInt {
+		if err != nil || !isIntegerType(arg1Type) {
 			return "", fmt.Errorf("second argument to Left must be an integer")
 		}
 		arg1C, err := c.Args[1].ToC(env)
@@ -325,7 +331,7 @@ func (c *CallNode) ToC(env map[string]DataType) (string, error) {
 			return "", err
 		}
 		arg1Type, err := c.Args[1].ExprType(env)
-		if err != nil || arg1Type != TypeInt {
+		if err != nil || !isIntegerType(arg1Type) {
 			return "", fmt.Errorf("second argument to Right must be an integer")
 		}
 		arg1C, err := c.Args[1].ToC(env)
@@ -343,7 +349,7 @@ func (c *CallNode) ToC(env map[string]DataType) (string, error) {
 			return "", err
 		}
 		arg1Type, err := c.Args[1].ExprType(env)
-		if err != nil || arg1Type != TypeInt {
+		if err != nil || !isIntegerType(arg1Type) {
 			return "", fmt.Errorf("second argument to Mid must be an integer")
 		}
 		arg1C, err := c.Args[1].ToC(env)
@@ -351,7 +357,7 @@ func (c *CallNode) ToC(env map[string]DataType) (string, error) {
 			return "", err
 		}
 		arg2Type, err := c.Args[2].ExprType(env)
-		if err != nil || arg2Type != TypeInt {
+		if err != nil || !isIntegerType(arg2Type) {
 			return "", fmt.Errorf("third argument to Mid must be an integer")
 		}
 		arg2C, err := c.Args[2].ToC(env)
@@ -467,24 +473,37 @@ func (b *BinaryNode) ExprType(env map[string]DataType) (DataType, error) {
 		if lt == TypeString && rt == TypeString {
 			return TypeInt, nil
 		}
-		if (lt == TypeInt || lt == TypeDouble) && (rt == TypeInt || rt == TypeDouble) {
+		if (isIntegerType(lt) || lt == TypeDouble) && (isIntegerType(rt) || rt == TypeDouble) {
 			return TypeInt, nil
 		}
 		return TypeUnknown, fmt.Errorf("incompatible types for comparison %s: %s and %s", b.Op, lt, rt)
 	}
 
 	if b.Op == "&" {
-		if (lt == TypeString || lt == TypeInt || lt == TypeDouble) && (rt == TypeString || rt == TypeInt || rt == TypeDouble) {
+		if (lt == TypeString || isIntegerType(lt) || lt == TypeDouble) && (rt == TypeString || isIntegerType(rt) || rt == TypeDouble) {
 			return TypeString, nil
 		}
 		return TypeUnknown, fmt.Errorf("incompatible types for concatenation operator &: %s and %s", lt, rt)
 	}
 
 	if b.Op == "%" {
-		if lt == TypeInt && rt == TypeInt {
+		if isIntegerType(lt) && isIntegerType(rt) {
 			return TypeInt, nil
 		}
 		return TypeUnknown, fmt.Errorf("incompatible types for modulo operator %%: %s and %s", lt, rt)
+	}
+
+	if b.Op == "And" || b.Op == "Or" || b.Op == "Xor" || b.Op == "<<" || b.Op == ">>" {
+		if isIntegerType(lt) && isIntegerType(rt) {
+			if lt == TypeInt || rt == TypeInt {
+				return TypeInt, nil
+			}
+			if lt == TypeShort || rt == TypeShort {
+				return TypeShort, nil
+			}
+			return TypeByte, nil
+		}
+		return TypeUnknown, fmt.Errorf("incompatible types for bitwise operator %s: %s and %s", b.Op, lt, rt)
 	}
 
 	if b.Op == "+" {
@@ -496,8 +515,14 @@ func (b *BinaryNode) ExprType(env map[string]DataType) (DataType, error) {
 	if lt == TypeDouble || rt == TypeDouble {
 		return TypeDouble, nil
 	}
-	if lt == TypeInt && rt == TypeInt {
-		return TypeInt, nil
+	if isIntegerType(lt) && isIntegerType(rt) {
+		if lt == TypeInt || rt == TypeInt {
+			return TypeInt, nil
+		}
+		if lt == TypeShort || rt == TypeShort {
+			return TypeShort, nil
+		}
+		return TypeByte, nil
 	}
 	return TypeUnknown, fmt.Errorf("incompatible types for operator %s: %s and %s", b.Op, lt, rt)
 }
@@ -587,7 +612,16 @@ func (b *BinaryNode) ToC(env map[string]DataType) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("(%s %s %s)", leftC, b.Op, rightC), nil
+	cOp := b.Op
+	switch b.Op {
+	case "And":
+		cOp = "&"
+	case "Or":
+		cOp = "|"
+	case "Xor":
+		cOp = "^"
+	}
+	return fmt.Sprintf("(%s %s %s)", leftC, cOp, rightC), nil
 }
 
 func formatStringArg(node ExprNode, env map[string]DataType) (string, error) {
@@ -605,6 +639,8 @@ func formatStringArg(node ExprNode, env map[string]DataType) (string, error) {
 		return cCode, nil
 	case TypeInt:
 		return fmt.Sprintf("vbx_int_to_str(%s)", cCode), nil
+	case TypeByte, TypeShort:
+		return fmt.Sprintf("vbx_int_to_str((long long)%s)", cCode), nil
 	case TypeDouble:
 		return fmt.Sprintf("vbx_double_to_str(%s)", cCode), nil
 	default:
@@ -685,6 +721,18 @@ func tokenizeExpr(input string) ([]Token, error) {
 			ident := input[start:i]
 			if strings.EqualFold(ident, "Mod") {
 				tokens = append(tokens, Token{Type: TokOp, Val: "%"})
+			} else if strings.EqualFold(ident, "And") {
+				tokens = append(tokens, Token{Type: TokOp, Val: "And"})
+			} else if strings.EqualFold(ident, "Or") {
+				tokens = append(tokens, Token{Type: TokOp, Val: "Or"})
+			} else if strings.EqualFold(ident, "Xor") {
+				tokens = append(tokens, Token{Type: TokOp, Val: "Xor"})
+			} else if strings.EqualFold(ident, "Shl") {
+				tokens = append(tokens, Token{Type: TokOp, Val: "<<"})
+			} else if strings.EqualFold(ident, "Shr") {
+				tokens = append(tokens, Token{Type: TokOp, Val: ">>"})
+			} else if strings.EqualFold(ident, "Not") {
+				tokens = append(tokens, Token{Type: TokOp, Val: "~"})
 			} else {
 				tokens = append(tokens, Token{Type: TokIdent, Val: ident})
 			}
@@ -712,12 +760,21 @@ func tokenizeExpr(input string) ([]Token, error) {
 			continue
 		}
 
+		if ch == '~' {
+			tokens = append(tokens, Token{Type: TokOp, Val: "~"})
+			i++
+			continue
+		}
+
 		if ch == '<' {
 			if i+1 < n && input[i+1] == '=' {
 				tokens = append(tokens, Token{Type: TokOp, Val: "<="})
 				i += 2
 			} else if i+1 < n && input[i+1] == '>' {
 				tokens = append(tokens, Token{Type: TokOp, Val: "<>"})
+				i += 2
+			} else if i+1 < n && input[i+1] == '<' {
+				tokens = append(tokens, Token{Type: TokOp, Val: "<<"})
 				i += 2
 			} else {
 				tokens = append(tokens, Token{Type: TokOp, Val: "<"})
@@ -729,6 +786,9 @@ func tokenizeExpr(input string) ([]Token, error) {
 		if ch == '>' {
 			if i+1 < n && input[i+1] == '=' {
 				tokens = append(tokens, Token{Type: TokOp, Val: ">="})
+				i += 2
+			} else if i+1 < n && input[i+1] == '>' {
+				tokens = append(tokens, Token{Type: TokOp, Val: ">>"})
 				i += 2
 			} else {
 				tokens = append(tokens, Token{Type: TokOp, Val: ">"})
@@ -807,7 +867,7 @@ func parseExpr(input string) (ExprNode, error) {
 }
 
 func (p *exprParser) parseComparison() (ExprNode, error) {
-	left, err := p.parseAddition()
+	left, err := p.parseBitwiseOr()
 	if err != nil {
 		return nil, err
 	}
@@ -815,6 +875,72 @@ func (p *exprParser) parseComparison() (ExprNode, error) {
 	for p.pos < len(p.tokens) {
 		tok := p.tokens[p.pos]
 		if tok.Type == TokOp && isComparisonOp(tok.Val) {
+			p.pos++
+			right, err := p.parseBitwiseOr()
+			if err != nil {
+				return nil, err
+			}
+			left = &BinaryNode{Left: left, Op: tok.Val, Right: right}
+		} else {
+			break
+		}
+	}
+	return left, nil
+}
+
+func (p *exprParser) parseBitwiseOr() (ExprNode, error) {
+	left, err := p.parseBitwiseAnd()
+	if err != nil {
+		return nil, err
+	}
+
+	for p.pos < len(p.tokens) {
+		tok := p.tokens[p.pos]
+		if tok.Type == TokOp && (tok.Val == "Or" || tok.Val == "Xor") {
+			p.pos++
+			right, err := p.parseBitwiseAnd()
+			if err != nil {
+				return nil, err
+			}
+			left = &BinaryNode{Left: left, Op: tok.Val, Right: right}
+		} else {
+			break
+		}
+	}
+	return left, nil
+}
+
+func (p *exprParser) parseBitwiseAnd() (ExprNode, error) {
+	left, err := p.parseShift()
+	if err != nil {
+		return nil, err
+	}
+
+	for p.pos < len(p.tokens) {
+		tok := p.tokens[p.pos]
+		if tok.Type == TokOp && tok.Val == "And" {
+			p.pos++
+			right, err := p.parseShift()
+			if err != nil {
+				return nil, err
+			}
+			left = &BinaryNode{Left: left, Op: tok.Val, Right: right}
+		} else {
+			break
+		}
+	}
+	return left, nil
+}
+
+func (p *exprParser) parseShift() (ExprNode, error) {
+	left, err := p.parseAddition()
+	if err != nil {
+		return nil, err
+	}
+
+	for p.pos < len(p.tokens) {
+		tok := p.tokens[p.pos]
+		if tok.Type == TokOp && (tok.Val == "<<" || tok.Val == ">>") {
 			p.pos++
 			right, err := p.parseAddition()
 			if err != nil {
@@ -878,13 +1004,26 @@ type UnaryNode struct {
 }
 
 func (u *UnaryNode) ExprType(env map[string]DataType) (DataType, error) {
-	return u.Expr.ExprType(env)
+	t, err := u.Expr.ExprType(env)
+	if err != nil {
+		return TypeUnknown, err
+	}
+	if u.Op == "~" || u.Op == "Not" {
+		if isIntegerType(t) {
+			return t, nil
+		}
+		return TypeUnknown, fmt.Errorf("bitwise NOT requires integer type, got %s", t)
+	}
+	return t, nil
 }
 
 func (u *UnaryNode) ToC(env map[string]DataType) (string, error) {
 	cExpr, err := u.Expr.ToC(env)
 	if err != nil {
 		return "", err
+	}
+	if u.Op == "~" || u.Op == "Not" {
+		return fmt.Sprintf("(~%s)", cExpr), nil
 	}
 	return fmt.Sprintf("(-%s)", cExpr), nil
 }
@@ -897,12 +1036,12 @@ func (p *exprParser) parsePrimary() (ExprNode, error) {
 	tok := p.tokens[p.pos]
 	p.pos++
 
-	if tok.Type == TokOp && tok.Val == "-" {
+	if tok.Type == TokOp && (tok.Val == "-" || tok.Val == "~" || tok.Val == "Not") {
 		expr, err := p.parsePrimary()
 		if err != nil {
 			return nil, err
 		}
-		return &UnaryNode{Op: "-", Expr: expr}, nil
+		return &UnaryNode{Op: tok.Val, Expr: expr}, nil
 	}
 
 	switch tok.Type {
@@ -1290,6 +1429,10 @@ func Transpile(vbxPath string) (string, error) {
 				switch strings.ToLower(tName) {
 				case "integer":
 					dt = TypeInt
+				case "byte":
+					dt = TypeByte
+				case "short":
+					dt = TypeShort
 				case "double":
 					dt = TypeDouble
 				case "string":
@@ -1649,6 +1792,10 @@ func Transpile(vbxPath string) (string, error) {
 					}
 				} else if strings.EqualFold(typeName, "integer") {
 					prePassEnv[varName] = TypeInt
+				} else if strings.EqualFold(typeName, "byte") {
+					prePassEnv[varName] = TypeByte
+				} else if strings.EqualFold(typeName, "short") {
+					prePassEnv[varName] = TypeShort
 				} else if strings.EqualFold(typeName, "double") {
 					prePassEnv[varName] = TypeDouble
 				} else if strings.EqualFold(typeName, "string") {
@@ -1664,6 +1811,10 @@ func Transpile(vbxPath string) (string, error) {
 					}
 				} else if strings.EqualFold(typeName, "integer") {
 					prePassEnv[varName] = TypeInt
+				} else if strings.EqualFold(typeName, "byte") {
+					prePassEnv[varName] = TypeByte
+				} else if strings.EqualFold(typeName, "short") {
+					prePassEnv[varName] = TypeShort
 				} else if strings.EqualFold(typeName, "double") {
 					prePassEnv[varName] = TypeDouble
 				} else if strings.EqualFold(typeName, "string") {
@@ -2079,7 +2230,7 @@ func Transpile(vbxPath string) (string, error) {
 				if err != nil {
 					return nil, vbxError(lineNum, line, fmt.Sprintf("%v", err))
 				}
-				if startDt != TypeInt {
+				if !isIntegerType(startDt) {
 					return nil, vbxError(lineNum, line, "For loop start expression must be integer")
 				}
 				cStart, err := startNode.ToC(localEnv)
@@ -2095,7 +2246,7 @@ func Transpile(vbxPath string) (string, error) {
 				if err != nil {
 					return nil, vbxError(lineNum, line, fmt.Sprintf("%v", err))
 				}
-				if endDt != TypeInt {
+				if !isIntegerType(endDt) {
 					return nil, vbxError(lineNum, line, "For loop end expression must be integer")
 				}
 				cEnd, err := endNode.ToC(localEnv)
@@ -2285,6 +2436,10 @@ func Transpile(vbxPath string) (string, error) {
 					switch strings.ToLower(typeName) {
 					case "integer":
 						expectedDt = TypeInt
+					case "byte":
+						expectedDt = TypeByte
+					case "short":
+						expectedDt = TypeShort
 					case "double":
 						expectedDt = TypeDouble
 					case "string":
@@ -2293,7 +2448,9 @@ func Transpile(vbxPath string) (string, error) {
 						return nil, vbxError(lineNum, line, fmt.Sprintf("unknown data type %q", typeName))
 					}
 					if dt != expectedDt {
-						if expectedDt == TypeDouble && dt == TypeInt {
+						if expectedDt == TypeDouble && isIntegerType(dt) {
+							// ok
+						} else if isIntegerType(expectedDt) && isIntegerType(dt) {
 							// ok
 						} else if expectedDt != dt {
 							return nil, vbxError(lineNum, line, fmt.Sprintf("cannot assign %s to %s variable %s", dt, expectedDt, varName))
@@ -2324,6 +2481,12 @@ func Transpile(vbxPath string) (string, error) {
 					case "integer":
 						dt = TypeInt
 						defaultVal = "0LL"
+					case "byte":
+						dt = TypeByte
+						defaultVal = "0"
+					case "short":
+						dt = TypeShort
+						defaultVal = "0"
 					case "double":
 						dt = TypeDouble
 						defaultVal = "0.0"
@@ -2550,6 +2713,10 @@ func Transpile(vbxPath string) (string, error) {
 				switch dt {
 				case TypeInt:
 					fmtSpec = "%lld"
+				case TypeByte:
+					fmtSpec = "%u"
+				case TypeShort:
+					fmtSpec = "%d"
 				case TypeDouble:
 					fmtSpec = "%f"
 				case TypeString:
@@ -2590,6 +2757,10 @@ func Transpile(vbxPath string) (string, error) {
 				switch dt {
 				case TypeInt:
 					fmtSpec = "%lld"
+				case TypeByte:
+					fmtSpec = "%u"
+				case TypeShort:
+					fmtSpec = "%d"
 				case TypeDouble:
 					fmtSpec = "%f"
 				case TypeString:
@@ -2615,7 +2786,7 @@ func Transpile(vbxPath string) (string, error) {
 					return nil, vbxError(lineNum, line, fmt.Sprintf("invalid array index expression in assignment to %s: %v", arrName, err))
 				}
 				idxType, err := idxNode.ExprType(localEnv)
-				if err != nil || idxType != TypeInt {
+				if err != nil || !isIntegerType(idxType) {
 					return nil, vbxError(lineNum, line, fmt.Sprintf("array index for %s must be integer", arrName))
 				}
 				cIdx, err := idxNode.ToC(localEnv)
@@ -2642,7 +2813,9 @@ func Transpile(vbxPath string) (string, error) {
 				}
 
 				if dt != arrType {
-					if arrType == TypeDouble && dt == TypeInt {
+					if arrType == TypeDouble && isIntegerType(dt) {
+						// ok
+					} else if isIntegerType(arrType) && isIntegerType(dt) {
 						// ok
 					} else {
 						return nil, vbxError(lineNum, line, fmt.Sprintf("cannot assign %s to %s array element %s", dt, arrType, arrName))
@@ -2682,7 +2855,7 @@ func Transpile(vbxPath string) (string, error) {
 					return nil, vbxError(lineNum, line, fmt.Sprintf("invalid array index expression in assignment to %s: %v", arrName, err))
 				}
 				idxType, err := idxNode.ExprType(localEnv)
-				if err != nil || idxType != TypeInt {
+				if err != nil || !isIntegerType(idxType) {
 					return nil, vbxError(lineNum, line, fmt.Sprintf("array index for %s must be integer", arrName))
 				}
 				cIdx, err := idxNode.ToC(localEnv)
@@ -2709,7 +2882,9 @@ func Transpile(vbxPath string) (string, error) {
 				}
 
 				if dt != arrType {
-					if arrType == TypeDouble && dt == TypeInt {
+					if arrType == TypeDouble && isIntegerType(dt) {
+						// ok
+					} else if isIntegerType(arrType) && isIntegerType(dt) {
 						// ok
 					} else {
 						return nil, vbxError(lineNum, line, fmt.Sprintf("cannot assign %s to %s array element %s", dt, arrType, arrName))
@@ -2766,8 +2941,10 @@ func Transpile(vbxPath string) (string, error) {
 				}
 
 				if dt != varType {
-					if varType == TypeDouble && dt == TypeInt {
+					if varType == TypeDouble && isIntegerType(dt) {
 						// ok to assign int to double
+					} else if isIntegerType(varType) && isIntegerType(dt) {
+						// ok to assign integer types to each other
 					} else if varType != dt {
 						return nil, vbxError(lineNum, line, fmt.Sprintf("cannot assign %s to %s variable %s", dt, varType, varName))
 					}
